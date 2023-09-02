@@ -82,9 +82,6 @@ impl FileHandler {
         let client = reqwest::Client::new();
         let res = client.post(url).json(&map).send().await?.text().await?;
 
-        // let resp = reqwest::blocking::get("")?
-        //     .json::<HashMap<String, String>>()?;
-        println!("{}", res);
         Ok(())
     }
 }
@@ -163,22 +160,12 @@ fn post_on_event(event: Event, url: &str) {
     }
     let file_handler_result = FileHandler::new(filepath);
     if file_handler_result.is_err() {
-        println!(
-            "File: {}, Error:{:?}",
-            filepath,
-            file_handler_result.unwrap_err()
-        );
+        // println!("File: {}, Error:{:?}",filepath,file_handler_result.unwrap_err());
         return;
     }
     let file_handler = file_handler_result.unwrap();
 
-    println!("event {:?}", event);
-    println!(
-        "File: {}\nuuid: {}",
-        file_handler.filepath(),
-        file_handler.uuid()
-    );
-    println!("-CONTENT-\n{}", file_handler.conent());
+    println!("Handling uuid: {}", file_handler.uuid());
 
     let upload_result = file_handler.upload(url);
     if upload_result.is_err() {
@@ -206,6 +193,5 @@ fn run_notifier(url: String, logpath: String) -> core::result::Result<(), notify
 fn main() {
     let url = env::var("TFO_API_LOG_URL").expect("$TFO_API_LOG_URL is not set");
     let logpath = env::var("LOG_PATH").expect("$LOG_PATH is not set");
-
     run_notifier(url, logpath).expect("Failed to start notifier");
 }
