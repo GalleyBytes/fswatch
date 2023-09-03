@@ -102,7 +102,9 @@ impl FileHandler {
 
         let client = reqwest::Client::new();
         let res = client.post(url).json(&map).send().await?.text().await?;
-        println!("{}", res);
+        if res != "" {
+            println!("{}", res);
+        }
         Ok(())
     }
 }
@@ -174,8 +176,12 @@ fn post_on_event(event: Event, url: &str, tfo_resource_uuid: &str, tfo_resource_
     if event.paths.len() != 1 {
         return;
     }
-
     let filepath = event.paths[0].to_str().unwrap();
+    post_log(filepath, url, tfo_resource_uuid, tfo_resource_generation);
+}
+
+/// Send a POST request for the filepath specified
+fn post_log(filepath: &str, url: &str, tfo_resource_uuid: &str, tfo_resource_generation: &str) {
     if !filepath.ends_with(".out") {
         return;
     }
@@ -222,8 +228,15 @@ fn run_notifier(
 }
 
 fn main() {
+    // The resources that are compatible with the TFO API should have the TFO_ORIGIN environment variables.
+    // The UUID that the TFO API registers is actually from the original request and is not actually the
+    // UUID that is genereated by the tf resource in the vCluster.
+    let mut tfo_resource_uuid: String;
+    tfo_resource_uuid = env::var("TFO_ORIGIN_UUID").unwrap();
+    if tfo_resource_uuid == "" {
+        tfo_resource_uuid = env::var("TFO_RESOURCE_UUID").expect("$TFO_RESOURCE_UUID is not set");
+    }
     let url = env::var("TFO_API_LOG_URL").expect("$TFO_API_LOG_URL is not set");
-    let tfo_resource_uuid = env::var("TFO_RESOURCE_UUID").expect("$TFO_RESOURCE_UUID is not set");
     let tfo_resource_generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
     let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
     let logpath = format!("{tfo_root_path}/generations/{tfo_resource_generation}");
