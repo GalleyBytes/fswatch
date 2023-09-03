@@ -90,6 +90,7 @@ impl FileHandler {
         &self,
         url: &str,
         tfo_resource_uuid: &str,
+        tfo_resource_generation: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut map = HashMap::new();
         map.insert("content", self.conent());
@@ -97,6 +98,7 @@ impl FileHandler {
         map.insert("task_name", self.task_name());
         map.insert("rerun_id", self.rerun_id());
         map.insert("tfo_resource_uuid", tfo_resource_uuid);
+        map.insert("tfo_resource_generation", tfo_resource_generation);
 
         let client = reqwest::Client::new();
         let res = client.post(url).json(&map).send().await?.text().await?;
@@ -165,7 +167,7 @@ fn is_all_alphanumeric(ch: Chars<'_>) -> bool {
 }
 
 /// For every log event, send a POST request of logs
-fn post_on_event(event: Event, url: &str, tfo_resource_uuid: &str) {
+fn post_on_event(event: Event, url: &str, tfo_resource_uuid: &str, tfo_resource_generation: &str) {
     if !is_write_event(&event) {
         return;
     }
@@ -186,7 +188,7 @@ fn post_on_event(event: Event, url: &str, tfo_resource_uuid: &str) {
 
     println!("Handling uuid: {}", file_handler.uuid());
 
-    let upload_result = file_handler.upload(url, tfo_resource_uuid);
+    let upload_result = file_handler.upload(url, tfo_resource_uuid, tfo_resource_generation);
     if upload_result.is_err() {
         println!("File: {}, Error:{:?}", filepath, upload_result.unwrap_err());
         return;
@@ -199,10 +201,16 @@ fn run_notifier(
     url: String,
     logpath: String,
     tfo_resource_uuid: String,
+    tfo_resource_generation: String,
 ) -> core::result::Result<(), notify::Error> {
     // Convenience method for creating the RecommendedWatcher for the current platform in immediate mode
     let mut watcher = notify::recommended_watcher(move |res| match res {
-        Ok(event) => post_on_event(event, url.as_str(), tfo_resource_uuid.as_str()),
+        Ok(event) => post_on_event(
+            event,
+            url.as_str(),
+            tfo_resource_uuid.as_str(),
+            tfo_resource_generation.as_str(),
+        ),
         Err(e) => println!("watch error: {:?}", e),
     })?;
 
@@ -215,7 +223,10 @@ fn run_notifier(
 
 fn main() {
     let url = env::var("TFO_API_LOG_URL").expect("$TFO_API_LOG_URL is not set");
-    let logpath = env::var("LOG_PATH").expect("$LOG_PATH is not set");
     let tfo_resource_uuid = env::var("TFO_RESOURCE_UUID").expect("$TFO_RESOURCE_UUID is not set");
-    run_notifier(url, logpath, tfo_resource_uuid).expect("Failed to start notifier");
+    let tfo_resource_generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
+    let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
+    let logpath = format!("{tfo_root_path}/generations/{tfo_resource_generation}");
+    run_notifier(url, logpath, tfo_resource_uuid, tfo_resource_generation)
+        .expect("Failed to start notifier");
 }
