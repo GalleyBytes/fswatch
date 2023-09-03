@@ -14,17 +14,21 @@ use notify::{RecursiveMode, Watcher};
 struct Log {
     pub filepath: String,
     pub uuid: String,
+    pub task_name: String,
+    pub rerun_id: String,
     pub content: String,
 }
 
 impl Log {
-    fn new(filepath: &str, uuid: &str) -> std::io::Result<Log> {
+    fn new(filepath: &str, uuid: &str, task_name: &str, rerun_id: &str) -> std::io::Result<Log> {
         let mut f = File::open(filepath)?;
         let mut buffer = String::new();
         f.read_to_string(&mut buffer)?;
         Ok(Log {
             filepath: filepath.to_string(),
             uuid: uuid.to_string(),
+            task_name: task_name.to_string(),
+            rerun_id: rerun_id.to_string(),
             content: buffer,
         })
     }
@@ -43,7 +47,7 @@ impl FileHandler {
             Err(Error::new(ErrorKind::Other, "Not correct number of dots"))
             // Err(Error())
         } else {
-            // let task_name = filename_parts[0];
+            let task_name = filename_parts[0];
             let rerun_id = filename_parts[1];
             let uuid = filename_parts[2];
 
@@ -55,7 +59,7 @@ impl FileHandler {
             } else if !is_uuid {
                 Err(Error::new(ErrorKind::Other, "Wrong uuid format"))
             } else {
-                let log = Log::new(filepath, uuid)?;
+                let log = Log::new(filepath, uuid, task_name, rerun_id)?;
                 Ok(FileHandler { log })
             }
         }
@@ -69,19 +73,34 @@ impl FileHandler {
         &self.log.uuid
     }
 
+    fn task_name(&self) -> &str {
+        &self.log.task_name
+    }
+
+    fn rerun_id(&self) -> &str {
+        &self.log.rerun_id
+    }
+
     fn filepath(&self) -> &str {
         &self.log.filepath
     }
 
     #[tokio::main]
-    async fn upload(&self, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn upload(
+        &self,
+        url: &str,
+        tfo_resource_uuid: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut map = HashMap::new();
         map.insert("content", self.conent());
         map.insert("uuid", self.uuid());
+        map.insert("task_name", self.task_name());
+        map.insert("rerun_id", self.rerun_id());
+        map.insert("tfo_resource_uuid", tfo_resource_uuid);
 
         let client = reqwest::Client::new();
         let res = client.post(url).json(&map).send().await?.text().await?;
-
+        println!("{}", res);
         Ok(())
     }
 }
@@ -146,7 +165,7 @@ fn is_all_alphanumeric(ch: Chars<'_>) -> bool {
 }
 
 /// For every log event, send a POST request of logs
-fn post_on_event(event: Event, url: &str) {
+fn post_on_event(event: Event, url: &str, tfo_resource_uuid: &str) {
     if !is_write_event(&event) {
         return;
     }
@@ -167,7 +186,7 @@ fn post_on_event(event: Event, url: &str) {
 
     println!("Handling uuid: {}", file_handler.uuid());
 
-    let upload_result = file_handler.upload(url);
+    let upload_result = file_handler.upload(url, tfo_resource_uuid);
     if upload_result.is_err() {
         println!("File: {}, Error:{:?}", filepath, upload_result.unwrap_err());
         return;
@@ -176,10 +195,14 @@ fn post_on_event(event: Event, url: &str) {
 
 /// Setup and start fs notify.
 /// For each nitification, send a http POST request with full log data.
-fn run_notifier(url: String, logpath: String) -> core::result::Result<(), notify::Error> {
+fn run_notifier(
+    url: String,
+    logpath: String,
+    tfo_resource_uuid: String,
+) -> core::result::Result<(), notify::Error> {
     // Convenience method for creating the RecommendedWatcher for the current platform in immediate mode
     let mut watcher = notify::recommended_watcher(move |res| match res {
-        Ok(event) => post_on_event(event, url.as_str()),
+        Ok(event) => post_on_event(event, url.as_str(), tfo_resource_uuid.as_str()),
         Err(e) => println!("watch error: {:?}", e),
     })?;
 
@@ -193,5 +216,6 @@ fn run_notifier(url: String, logpath: String) -> core::result::Result<(), notify
 fn main() {
     let url = env::var("TFO_API_LOG_URL").expect("$TFO_API_LOG_URL is not set");
     let logpath = env::var("LOG_PATH").expect("$LOG_PATH is not set");
-    run_notifier(url, logpath).expect("Failed to start notifier");
+    let tfo_resource_uuid = env::var("TFO_RESOURCE_UUID").expect("$TFO_RESOURCE_UUID is not set");
+    run_notifier(url, logpath, tfo_resource_uuid).expect("Failed to start notifier");
 }
