@@ -280,11 +280,11 @@ fn run_notifier(api_client: APIClient, logpath: String) -> core::result::Result<
 fn main() {
     let url = env::var("TFO_API_URL").expect("$TFO_API_URL is not set");
     let token = env::var("TFO_API_LOG_TOKEN").expect("$TFO_API_LOG_TOKEN is not set");
-    let mut api_client = APIClient::new(url, token);
-    api_client.parse_claims();
+    let api_client = APIClient::new(url, token);
 
+    let generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
     let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
-    let logpath = format!("{tfo_root_path}/generations/{}", api_client.generation);
+    let logpath = format!("{tfo_root_path}/generations/{}", generation);
 
     run_notifier(api_client, logpath).expect("Failed to start notifier");
 }
