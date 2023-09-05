@@ -209,8 +209,11 @@ dependencies = [
 name = "fswatch"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "notify",
  "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

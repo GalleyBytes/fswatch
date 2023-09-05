@@ -3,16 +3,18 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
+use std::str;
 use std::str::Chars;
 use std::time::Duration;
 use std::{env, thread};
 
+use base64::{engine::general_purpose, Engine as _};
 use notify::Event;
 use notify::{RecursiveMode, Watcher};
+use serde::Deserialize;
 
 #[derive(Debug)]
 struct Log {
-    pub filepath: String,
     pub uuid: String,
     pub task_name: String,
     pub rerun_id: String,
@@ -25,7 +27,6 @@ impl Log {
         let mut buffer = String::new();
         f.read_to_string(&mut buffer)?;
         Ok(Log {
-            filepath: filepath.to_string(),
             uuid: uuid.to_string(),
             task_name: task_name.to_string(),
             rerun_id: rerun_id.to_string(),
@@ -80,28 +81,87 @@ impl FileHandler {
     fn rerun_id(&self) -> &str {
         &self.log.rerun_id
     }
+}
 
-    fn filepath(&self) -> &str {
-        &self.log.filepath
+#[derive(Debug, Deserialize)]
+struct Payload {
+    generation: String,
+    // claims: HashMap<&str, &str>,
+}
+
+#[derive(Debug)]
+struct APIClient {
+    url: String,
+    token: String,
+    generation: String,
+}
+
+impl APIClient {
+    fn new(url: String, token: String) -> APIClient {
+        let api_client = APIClient {
+            url: url,
+            token: token,
+            generation: String::new(),
+        };
+
+        api_client
+    }
+
+    /// TODO future
+    // fn get_token(&self) {}
+
+    /// TODO future
+    // fn check_token_expiration(&self) {}
+
+    fn parse_claims(&mut self) {
+        let jwt_items: Vec<&str> = self.token.split(".").collect();
+
+        let payload_raw = jwt_items[1];
+        let n = payload_raw.len() % 4;
+        let payload_b64encoded_urlsafe = if n > 0 {
+            format!("{:=<pad$}!", payload_raw, pad = n)
+        } else {
+            payload_raw.to_string()
+        };
+
+        let decoded_bytes = general_purpose::STANDARD
+            .decode(payload_b64encoded_urlsafe)
+            .expect("Could not decode token");
+        let mut decoded_string = str::from_utf8(&decoded_bytes).expect("Token is not utf8");
+        let d = decoded_string.to_string();
+        decoded_string = &d;
+
+        let payload: Payload = serde_json::from_str(decoded_string)
+            .expect(format!("Couldn't get json from string {decoded_string}").as_str());
+
+        self.generation = payload.generation;
     }
 
     #[tokio::main]
-    async fn upload(
-        &self,
-        url: &str,
-        tfo_resource_uuid: &str,
-        tfo_resource_generation: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn upload(&self, file_handler: FileHandler) -> Result<(), Box<dyn std::error::Error>> {
+        let log_url = format!("{}/api/v1/task", self.url);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "Token",
+            reqwest::header::HeaderValue::from_str(self.token.as_str()).unwrap(),
+        );
+
         let mut map = HashMap::new();
-        map.insert("content", self.conent());
-        map.insert("uuid", self.uuid());
-        map.insert("task_name", self.task_name());
-        map.insert("rerun_id", self.rerun_id());
-        map.insert("tfo_resource_uuid", tfo_resource_uuid);
-        map.insert("tfo_resource_generation", tfo_resource_generation);
+        map.insert("content", file_handler.conent());
+        map.insert("uuid", file_handler.uuid());
+        map.insert("task_name", file_handler.task_name());
+        map.insert("rerun_id", file_handler.rerun_id());
 
         let client = reqwest::Client::new();
-        let res = client.post(url).json(&map).send().await?.text().await?;
+        let res = client
+            .post(log_url)
+            .headers(headers)
+            .json(&map)
+            .send()
+            .await?
+            .text()
+            .await?;
         if res != "" {
             println!("{}", res);
         }
@@ -169,7 +229,7 @@ fn is_all_alphanumeric(ch: Chars<'_>) -> bool {
 }
 
 /// For every log event, send a POST request of logs
-fn post_on_event(event: Event, url: &str, tfo_resource_uuid: &str, tfo_resource_generation: &str) {
+fn post_on_event(event: Event, api_client: &APIClient) {
     if !is_write_event(&event) {
         return;
     }
@@ -177,11 +237,11 @@ fn post_on_event(event: Event, url: &str, tfo_resource_uuid: &str, tfo_resource_
         return;
     }
     let filepath = event.paths[0].to_str().unwrap();
-    post_log(filepath, url, tfo_resource_uuid, tfo_resource_generation);
+    post_log(filepath, api_client);
 }
 
 /// Send a POST request for the filepath specified
-fn post_log(filepath: &str, url: &str, tfo_resource_uuid: &str, tfo_resource_generation: &str) {
+fn post_log(filepath: &str, api_client: &APIClient) {
     if !filepath.ends_with(".out") {
         return;
     }
@@ -194,7 +254,7 @@ fn post_log(filepath: &str, url: &str, tfo_resource_uuid: &str, tfo_resource_gen
 
     println!("Handling uuid: {}", file_handler.uuid());
 
-    let upload_result = file_handler.upload(url, tfo_resource_uuid, tfo_resource_generation);
+    let upload_result = api_client.upload(file_handler);
     if upload_result.is_err() {
         println!("File: {}, Error:{:?}", filepath, upload_result.unwrap_err());
         return;
@@ -203,20 +263,10 @@ fn post_log(filepath: &str, url: &str, tfo_resource_uuid: &str, tfo_resource_gen
 
 /// Setup and start fs notify.
 /// For each nitification, send a http POST request with full log data.
-fn run_notifier(
-    url: String,
-    logpath: String,
-    tfo_resource_uuid: String,
-    tfo_resource_generation: String,
-) -> core::result::Result<(), notify::Error> {
+fn run_notifier(api_client: APIClient, logpath: String) -> core::result::Result<(), notify::Error> {
     // Convenience method for creating the RecommendedWatcher for the current platform in immediate mode
     let mut watcher = notify::recommended_watcher(move |res| match res {
-        Ok(event) => post_on_event(
-            event,
-            url.as_str(),
-            tfo_resource_uuid.as_str(),
-            tfo_resource_generation.as_str(),
-        ),
+        Ok(event) => post_on_event(event, &api_client),
         Err(e) => println!("watch error: {:?}", e),
     })?;
 
@@ -228,18 +278,13 @@ fn run_notifier(
 }
 
 fn main() {
-    // The resources that are compatible with the TFO API should have the TFO_ORIGIN environment variables.
-    // The UUID that the TFO API registers is actually from the original request and is not actually the
-    // UUID that is genereated by the tf resource in the vCluster.
-    let mut tfo_resource_uuid: String;
-    tfo_resource_uuid = env::var("TFO_ORIGIN_UUID").unwrap();
-    if tfo_resource_uuid == "" {
-        tfo_resource_uuid = env::var("TFO_RESOURCE_UUID").expect("$TFO_RESOURCE_UUID is not set");
-    }
-    let url = env::var("TFO_API_LOG_URL").expect("$TFO_API_LOG_URL is not set");
-    let tfo_resource_generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
+    let url = env::var("TFO_API_URL").expect("$TFO_API_URL is not set");
+    let token = env::var("TFO_API_LOG_TOKEN").expect("$TFO_API_LOG_TOKEN is not set");
+    let mut api_client = APIClient::new(url, token);
+    api_client.parse_claims();
+
     let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
-    let logpath = format!("{tfo_root_path}/generations/{tfo_resource_generation}");
-    run_notifier(url, logpath, tfo_resource_uuid, tfo_resource_generation)
-        .expect("Failed to start notifier");
+    let logpath = format!("{tfo_root_path}/generations/{}", api_client.generation);
+
+    run_notifier(api_client, logpath).expect("Failed to start notifier");
 }
