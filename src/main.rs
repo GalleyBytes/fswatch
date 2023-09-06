@@ -270,6 +270,10 @@ fn run_notifier(api_client: APIClient, logpath: String) -> core::result::Result<
         Err(e) => println!("watch error: {:?}", e),
     })?;
 
+    while std::fs::metadata(logpath.as_str()).is_err() {
+        thread::sleep(Duration::from_secs(1));
+    }
+
     watcher.watch(Path::new(logpath.as_str()), RecursiveMode::NonRecursive)?;
     println!("Watching started...");
     loop {
