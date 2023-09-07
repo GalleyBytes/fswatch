@@ -94,14 +94,16 @@ struct APIClient {
     url: String,
     token: String,
     generation: String,
+    in_cluster_generation: String,
 }
 
 impl APIClient {
-    fn new(url: String, token: String) -> APIClient {
+    fn new(url: String, token: String, in_cluster_generation: &str) -> APIClient {
         let api_client = APIClient {
             url: url,
             token: token,
             generation: String::new(),
+            in_cluster_generation: in_cluster_generation.to_string(),
         };
 
         api_client
@@ -152,6 +154,7 @@ impl APIClient {
         map.insert("uuid", file_handler.uuid());
         map.insert("task_name", file_handler.task_name());
         map.insert("rerun_id", file_handler.rerun_id());
+        map.insert("generation", &self.in_cluster_generation);
 
         let client = reqwest::Client::new();
         let res = client
@@ -284,9 +287,9 @@ fn run_notifier(api_client: APIClient, logpath: String) -> core::result::Result<
 fn main() {
     let url = env::var("TFO_API_URL").expect("$TFO_API_URL is not set");
     let token = env::var("TFO_API_LOG_TOKEN").expect("$TFO_API_LOG_TOKEN is not set");
-    let api_client = APIClient::new(url, token);
-
     let generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
+    let api_client = APIClient::new(url, token, generation.as_str());
+
     let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
     let logpath = format!("{tfo_root_path}/generations/{}", generation);
 
