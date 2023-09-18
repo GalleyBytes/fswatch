@@ -210,6 +210,7 @@ name = "fswatch"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "inclusterget",
  "notify",
  "reqwest",
  "serde",
@@ -381,6 +382,15 @@ checksum = "7d20d6b07bfbc108882d88ed8e37d39636dcc260e15e30c45e6ba089610b917c"
 dependencies = [
  "unicode-bidi",
  "unicode-normalization",
+]
+
+[[package]]
+name = "inclusterget"
+version = "0.1.0"
+source = "git+https://github.com/galleybytes/inclusterget.git#93eeb2c3ec217ec969de1cf1ff45876786e7ec2e"
+dependencies = [
+ "reqwest",
+ "tokio",
 ]
 
 [[package]]

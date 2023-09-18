@@ -3,12 +3,14 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
+use std::process::exit;
 use std::str;
 use std::str::Chars;
 use std::time::Duration;
 use std::{env, thread};
 
 use base64::{engine::general_purpose, Engine as _};
+use inclusterget;
 use notify::Event;
 use notify::{RecursiveMode, Watcher};
 use serde::Deserialize;
@@ -81,6 +83,34 @@ impl FileHandler {
     fn rerun_id(&self) -> &str {
         &self.log.rerun_id
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct Pod {
+    status: PodStatus,
+}
+
+#[derive(Debug, Deserialize)]
+struct PodStatus {
+    #[serde(rename = "containerStatuses")]
+    container_statuses: Vec<ContainerStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerStatus {
+    name: String,
+    state: ContainerState,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerState {
+    terminated: Option<TerminatedState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminatedState {
+    #[serde(rename = "exitCode")]
+    exit_code: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,7 +296,14 @@ fn post_log(filepath: &str, api_client: &APIClient) {
 
 /// Setup and start fs notify.
 /// For each nitification, send a http POST request with full log data.
-fn run_notifier(api_client: APIClient, logpath: String) -> core::result::Result<(), notify::Error> {
+fn run_notifier(
+    api_client: APIClient,
+    logpath: String,
+    group: String,
+    kind: String,
+    namespace: String,
+    resource: String,
+) -> core::result::Result<(), notify::Error> {
     // Convenience method for creating the RecommendedWatcher for the current platform in immediate mode
     let mut watcher = notify::recommended_watcher(move |res| match res {
         Ok(event) => post_on_event(event, &api_client),
@@ -278,13 +315,37 @@ fn run_notifier(api_client: APIClient, logpath: String) -> core::result::Result<
     }
 
     watcher.watch(Path::new(logpath.as_str()), RecursiveMode::NonRecursive)?;
-    println!("Watching started...");
+    println!("Watch started...");
     loop {
-        thread::sleep(Duration::from_secs(600));
+        let resp = inclusterget::get(
+            group.clone(),
+            kind.clone(),
+            namespace.clone(),
+            resource.clone(),
+        )
+        .unwrap();
+
+        let pod: Pod = serde_json::from_str(resp.as_str()).unwrap();
+        for item in pod.status.container_statuses {
+            if item.name == String::from("task") {
+                if item.state.terminated.is_some() {
+                    println!("Task terminated. Shutting down watch service");
+                    // Allow time to complete inflight api calls
+                    thread::sleep(Duration::from_secs(3));
+                    exit(item.state.terminated.unwrap().exit_code);
+                }
+            }
+        }
+        thread::sleep(Duration::from_secs(30));
     }
 }
 
 fn main() {
+    let group = String::from("v1");
+    let kind = String::from("pods");
+    let namespace = env::var("TFO_NAMESPACE").expect("$TFO_NAMESPACE is not set");
+    let resource = env::var("HOSTNAME").expect("$HOSTNAME is not set");
+
     let url = env::var("TFO_API_URL").expect("$TFO_API_URL is not set");
     let token = env::var("TFO_API_LOG_TOKEN").expect("$TFO_API_LOG_TOKEN is not set");
     let generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
@@ -293,5 +354,6 @@ fn main() {
     let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
     let logpath = format!("{tfo_root_path}/generations/{}", generation);
 
-    run_notifier(api_client, logpath).expect("Failed to start notifier");
+    run_notifier(api_client, logpath, group, kind, namespace, resource)
+        .expect("Failed to start notifier");
 }
