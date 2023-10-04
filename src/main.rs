@@ -196,7 +196,7 @@ impl APIClient {
             .text()
             .await?;
         if res != "" {
-            println!("{}", res);
+            println!("INFO {}", res);
         }
         Ok(())
     }
@@ -285,11 +285,15 @@ fn post_log(filepath: &str, api_client: &APIClient) {
     }
     let file_handler = file_handler_result.unwrap();
 
-    println!("Handling uuid: {}", file_handler.uuid());
+    println!("INFO Handling uuid: {}", file_handler.uuid());
 
     let upload_result = api_client.upload(file_handler);
     if upload_result.is_err() {
-        println!("File: {}, Error:{:?}", filepath, upload_result.unwrap_err());
+        println!(
+            "INFO File: {}, Error:{:?}",
+            filepath,
+            upload_result.unwrap_err()
+        );
         return;
     }
 }
@@ -304,24 +308,24 @@ fn run_notifier(
     namespace: String,
     resource: String,
 ) -> core::result::Result<(), notify::Error> {
-    println!("Configuring notifier");
+    println!("INFO Configuring notifier");
     // Convenience method for creating the RecommendedWatcher for the current platform in immediate mode
     let mut watcher = notify::recommended_watcher(move |res| match res {
         Ok(event) => post_on_event(event, &api_client),
-        Err(e) => println!("watch error: {:?}", e),
+        Err(e) => println!("ERROR watch error: {:?}", e),
     })?;
 
     loop {
         let ready = std::fs::metadata(logpath.as_str());
         match ready {
             Ok(_) => break,
-            Err(e) => println!("{}: {}", logpath, e.to_string()),
+            Err(e) => println!("INFO {}: {}", logpath, e.to_string()),
         }
         thread::sleep(Duration::from_secs(1));
     }
 
     watcher.watch(Path::new(logpath.as_str()), RecursiveMode::NonRecursive)?;
-    println!("Watch started at {}", logpath);
+    println!("INFO Watch started at {}", logpath);
     let mut last_err_code: u8 = 0;
     loop {
         // The purpose of this loop is primarily to keep the notifier alive.
@@ -337,15 +341,29 @@ fn run_notifier(
         if resp.is_err() {
             let err = resp.unwrap_err();
             if last_err_code != err.1 {
-                println!("{}", err.0);
+                println!("ERROR {}", err.0);
                 last_err_code = err.1;
             }
             thread::sleep(Duration::from_secs(5));
             continue;
         }
-
-        let response = resp.unwrap();
-        let pod: Pod = serde_json::from_str(response.as_str()).unwrap_or(Pod {
+        let mut response = resp.unwrap();
+        let parsed_pod: Result<Pod, serde_json::Error> = serde_json::from_str(response.as_str());
+        if parsed_pod.is_err() {
+            // arbitrary err_code is 9
+            if last_err_code != 9 {
+                response.pop();
+                println!(
+                    "ERROR unable to parse reponse: {}: {}",
+                    response,
+                    parsed_pod.unwrap_err().to_string()
+                );
+                last_err_code = 9;
+            }
+            thread::sleep(Duration::from_secs(5));
+            continue;
+        };
+        let pod = parsed_pod.unwrap_or(Pod {
             status: PodStatus {
                 container_statuses: vec![],
             },
@@ -353,7 +371,7 @@ fn run_notifier(
         for item in pod.status.container_statuses {
             if item.name == String::from("task") {
                 if item.state.terminated.is_some() {
-                    println!("Task terminated. Shutting down watch service");
+                    println!("INFO Task terminated. Shutting down watch service");
                     // Allow time to complete inflight api calls
                     thread::sleep(Duration::from_secs(3));
                     exit(item.state.terminated.unwrap().exit_code);
