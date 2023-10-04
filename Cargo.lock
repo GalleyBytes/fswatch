@@ -387,7 +387,7 @@ dependencies = [
 [[package]]
 name = "inclusterget"
 version = "0.1.0"
-source = "git+https://github.com/galleybytes/inclusterget.git#93eeb2c3ec217ec969de1cf1ff45876786e7ec2e"
+source = "git+https://github.com/galleybytes/inclusterget.git#f7256e39eeb4fe9d5d125c827dac725b8c062076"
 dependencies = [
  "reqwest",
  "tokio",

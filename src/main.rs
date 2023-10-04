@@ -304,28 +304,52 @@ fn run_notifier(
     namespace: String,
     resource: String,
 ) -> core::result::Result<(), notify::Error> {
+    println!("Configuring notifier");
     // Convenience method for creating the RecommendedWatcher for the current platform in immediate mode
     let mut watcher = notify::recommended_watcher(move |res| match res {
         Ok(event) => post_on_event(event, &api_client),
         Err(e) => println!("watch error: {:?}", e),
     })?;
 
-    while std::fs::metadata(logpath.as_str()).is_err() {
+    loop {
+        let ready = std::fs::metadata(logpath.as_str());
+        match ready {
+            Ok(_) => break,
+            Err(e) => println!("{}: {}", logpath, e.to_string()),
+        }
         thread::sleep(Duration::from_secs(1));
     }
 
     watcher.watch(Path::new(logpath.as_str()), RecursiveMode::NonRecursive)?;
-    println!("Watch started...");
+    println!("Watch started at {}", logpath);
+    let mut last_err_code: u8 = 0;
     loop {
+        // The purpose of this loop is primarily to keep the notifier alive.
+        // The secondary usage is to watch for the termination of container for a given kubernetes pod.
+        // Upon termination, the program will exit.
         let resp = inclusterget::get(
             group.clone(),
             kind.clone(),
             namespace.clone(),
             resource.clone(),
-        )
-        .unwrap();
+        );
 
-        let pod: Pod = serde_json::from_str(resp.as_str()).unwrap();
+        if resp.is_err() {
+            let err = resp.unwrap_err();
+            if last_err_code != err.1 {
+                println!("{}", err.0);
+                last_err_code = err.1;
+            }
+            thread::sleep(Duration::from_secs(5));
+            continue;
+        }
+
+        let response = resp.unwrap();
+        let pod: Pod = serde_json::from_str(response.as_str()).unwrap_or(Pod {
+            status: PodStatus {
+                container_statuses: vec![],
+            },
+        });
         for item in pod.status.container_statuses {
             if item.name == String::from("task") {
                 if item.state.terminated.is_some() {
@@ -336,15 +360,16 @@ fn run_notifier(
                 }
             }
         }
-        thread::sleep(Duration::from_secs(30));
+
+        thread::sleep(Duration::from_secs(5));
     }
 }
 
 fn main() {
     let group = String::from("v1");
     let kind = String::from("pods");
-    let namespace = env::var("TFO_NAMESPACE").expect("$TFO_NAMESPACE is not set");
-    let resource = env::var("HOSTNAME").expect("$HOSTNAME is not set");
+    let namespace = env::var("TFO_NAMESPACE").unwrap_or(String::from("default"));
+    let resource = env::var("HOSTNAME").unwrap_or(String::from("-"));
 
     let url = env::var("TFO_API_URL").expect("$TFO_API_URL is not set");
     let token = env::var("TFO_API_LOG_TOKEN").expect("$TFO_API_LOG_TOKEN is not set");
