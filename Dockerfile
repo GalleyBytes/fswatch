@@ -47,6 +47,7 @@ RUN cargo install --target x86_64-unknown-linux-musl --path .
 #                              Bundle
 # ------------------------------- -------------------------------
 FROM scratch
+COPY --from=builder /etc/ssl/certs /etc/ssl/certs
 COPY --from=builder /usr/local/cargo/bin/fswatch .
 CMD ["./fswatch"]
 LABEL org.opencontainers.image.source https://github.com/galleybytes/fswatch
