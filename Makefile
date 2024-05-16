@@ -9,7 +9,7 @@ IMG ?= ${IMAGE_REPO}/${IMAGE_NAME}:${VERSION}
 RELEASE_PROJECT = true
 
 build:
-	docker build . -t ${IMG}
+	docker buildx build --platform linux/amd64 .  -t ${IMG}
 
 reload-to-kind: build
 	kind load docker-image ${IMG}
