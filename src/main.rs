@@ -1,3 +1,10 @@
+use base64::{engine::general_purpose, Engine as _};
+use inclusterget;
+use notify::Event;
+use notify::{RecursiveMode, Watcher};
+use reqwest::StatusCode;
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
@@ -6,14 +13,9 @@ use std::path::Path;
 use std::process::exit;
 use std::str;
 use std::str::Chars;
+use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 use std::{env, thread};
-
-use base64::{engine::general_purpose, Engine as _};
-use inclusterget;
-use notify::Event;
-use notify::{RecursiveMode, Watcher};
-use serde::Deserialize;
 
 #[derive(Debug)]
 struct Log {
@@ -35,6 +37,18 @@ impl Log {
             content: buffer,
         })
     }
+}
+
+#[derive(Deserialize, Debug)]
+struct GenericTfoApiResponse {
+    status_info: StatusInfo,
+    data: Option<Value>,
+}
+
+#[derive(Deserialize, Debug)]
+struct StatusInfo {
+    status_code: u8,
+    message: Option<String>,
 }
 
 #[derive(Debug)]
@@ -119,21 +133,31 @@ struct Payload {
     // claims: HashMap<&str, &str>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct APIClient {
     url: String,
     token: String,
     generation: String,
     in_cluster_generation: String,
+    refresh_token_path: String,
+    token_path: String,
 }
 
 impl APIClient {
-    fn new(url: String, token: String, in_cluster_generation: &str) -> APIClient {
+    fn new(
+        url: String,
+        token: String,
+        in_cluster_generation: &str,
+        refresh_token_path: String,
+        token_path: String,
+    ) -> APIClient {
         let api_client = APIClient {
             url: url,
             token: token,
             generation: String::new(),
             in_cluster_generation: in_cluster_generation.to_string(),
+            refresh_token_path: refresh_token_path,
+            token_path: token_path,
         };
 
         api_client
@@ -144,6 +168,9 @@ impl APIClient {
 
     /// TODO future
     // fn check_token_expiration(&self) {}
+    fn read_refresh_token(&self) -> String {
+        read_file(&self.refresh_token_path).expect("Could not read file")
+    }
 
     fn parse_claims(&mut self) {
         let jwt_items: Vec<&str> = self.token.split(".").collect();
@@ -170,7 +197,10 @@ impl APIClient {
     }
 
     #[tokio::main]
-    async fn upload(&self, file_handler: FileHandler) -> Result<(), Box<dyn std::error::Error>> {
+    async fn upload(
+        &mut self,
+        file_handler: &FileHandler,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let log_url = format!("{}/api/v1/task", self.url);
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -187,19 +217,94 @@ impl APIClient {
         map.insert("generation", &self.in_cluster_generation);
 
         let client = reqwest::Client::new();
-        let res = client
+        let response = client
             .post(log_url)
-            .headers(headers)
+            .headers(headers.clone())
             .json(&map)
             .send()
-            .await?
-            .text()
             .await?;
-        if res != "" {
-            println!("INFO {}", res);
+
+        if response.status() == StatusCode::UNAUTHORIZED {
+            // The token is expired or invalid
+            let mut refresh_attempts = 0;
+            let max_refresh_attempts = 6;
+            loop {
+                if refresh_attempts > max_refresh_attempts {
+                    break;
+                }
+                match self.get_new_token().await {
+                    Ok(token) => {
+                        println!("INFO new token found");
+                        self.token = token;
+                        return Ok(true);
+                    }
+                    Err(err) => {
+                        println!("ERROR {}", err);
+                        refresh_attempts += 1;
+                    }
+                }
+                thread::sleep(Duration::from_secs(15));
+            }
+            println!("ERROR failed all attempts to get a new token");
+            return Ok(false);
+        } else {
+            let message = response.text().await?;
+            if message != "" {
+                println!("INFO {}", message);
+            }
         }
-        Ok(())
+
+        Ok(false)
     }
+
+    /// First read token from disk. If unchanged, read the refresh_token from disk and request a new token.
+    async fn get_new_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+        if self.token.trim() != read_file(&self.token_path)?.trim() {
+            return Ok(read_file(&self.token_path)?);
+        }
+
+        let client = reqwest::Client::new();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "Token",
+            reqwest::header::HeaderValue::from_str(self.token.as_str()).unwrap(),
+        );
+
+        let refresh_token = self.read_refresh_token();
+        let response = client
+            .post(format!("{}/refresh", self.url))
+            .headers(headers)
+            .json(&json!({"refresh_token": refresh_token}))
+            .send()
+            .await?;
+        if response.status() != StatusCode::OK {
+            return Err(response.text().await?.into());
+        } else {
+            let api_response = response.json::<GenericTfoApiResponse>().await?;
+            let data = api_response
+                .data
+                .expect("Refresh token response did not contain new JWT");
+            let arr = data
+                .as_array()
+                .expect("Refresh token repsosne was not properly formatted");
+            if arr.len() != 1 {
+                return Err("Refresh token response did not contain data".into());
+            }
+            let new_token = arr
+                .get(0)
+                .unwrap()
+                .as_str()
+                .expect("Refresh token data was not properly formatted");
+            return Ok(new_token.to_string());
+        }
+    }
+}
+
+fn read_file(filepath: &str) -> std::io::Result<String> {
+    let mut f = File::open(filepath)?;
+    let mut buffer = String::new();
+    f.read_to_string(&mut buffer)?;
+    Ok(buffer)
 }
 
 /// Check if is a write event. Ignore events like metadata changes.
@@ -262,7 +367,7 @@ fn is_all_alphanumeric(ch: Chars<'_>) -> bool {
 }
 
 /// For every log event, send a POST request of logs
-fn post_on_event(event: Event, api_client: &APIClient) {
+fn post_on_event(event: Event, api_client: &mut APIClient, tx: &Sender<bool>) {
     if !is_write_event(&event) {
         return;
     }
@@ -270,11 +375,19 @@ fn post_on_event(event: Event, api_client: &APIClient) {
         return;
     }
     let filepath = event.paths[0].to_str().unwrap();
+
+    let _ = tx.send(true);
     post_log(filepath, api_client);
+    loop {
+        match tx.send(false) {
+            Ok(_) => break,
+            Err(_) => continue,
+        }
+    }
 }
 
 /// Send a POST request for the filepath specified
-fn post_log(filepath: &str, api_client: &APIClient) {
+fn post_log(filepath: &str, api_client: &mut APIClient) {
     if !filepath.ends_with(".out") {
         return;
     }
@@ -287,14 +400,17 @@ fn post_log(filepath: &str, api_client: &APIClient) {
 
     println!("INFO Handling uuid: {}", file_handler.uuid());
 
-    let upload_result = api_client.upload(file_handler);
-    if upload_result.is_err() {
-        println!(
-            "INFO File: {}, Error:{:?}",
-            filepath,
-            upload_result.unwrap_err()
-        );
-        return;
+    match api_client.upload(&file_handler) {
+        Ok(rerun) => {
+            if rerun {
+                println!("INFO Retry sending logs");
+                return post_log(filepath, api_client);
+            }
+        }
+        Err(err) => {
+            println!("INFO File: {}, Error:{:?}", filepath, err);
+            return;
+        }
     }
 }
 
@@ -308,10 +424,13 @@ fn run_notifier(
     namespace: String,
     resource: String,
 ) -> core::result::Result<(), notify::Error> {
+    let (tx, rx) = mpsc::channel();
+    let mut inflight = false;
+    let mut api_client = api_client.clone();
     println!("INFO Configuring notifier");
     // Convenience method for creating the RecommendedWatcher for the current platform in immediate mode
     let mut watcher = notify::recommended_watcher(move |res| match res {
-        Ok(event) => post_on_event(event, &api_client),
+        Ok(event) => post_on_event(event, &mut api_client, &tx),
         Err(e) => println!("ERROR watch error: {:?}", e),
     })?;
 
@@ -371,14 +490,37 @@ fn run_notifier(
         for item in pod.status.container_statuses {
             if item.name == String::from("task") {
                 if item.state.terminated.is_some() {
-                    println!("INFO Task terminated. Shutting down watch service");
-                    // Allow time to complete inflight api calls
-                    thread::sleep(Duration::from_secs(3));
+                    println!("INFO Main task complete. Checking if safe to exit...");
+                    loop {
+                        // Consume all the messages updating inflight
+                        match rx.try_recv() {
+                            Ok(b) => inflight = b,
+                            Err(_) => break,
+                        };
+                    }
+                    println!("INFO API request inflight: {}", inflight);
+                    loop {
+                        if inflight {
+                            // block until
+                            inflight = rx.recv().unwrap();
+                            println!("INFO API request inflight={}", inflight);
+                        } else {
+                            break;
+                        }
+                    }
+                    println!("INFO Exiting");
                     exit(item.state.terminated.unwrap().exit_code);
                 }
             }
         }
 
+        // clear the message queue periodically
+        loop {
+            match rx.try_recv() {
+                Ok(b) => inflight = b,
+                Err(_) => break,
+            };
+        }
         thread::sleep(Duration::from_secs(5));
     }
 }
@@ -391,8 +533,19 @@ fn main() {
 
     let url = env::var("TFO_API_URL").expect("$TFO_API_URL is not set");
     let token = env::var("TFO_API_LOG_TOKEN").expect("$TFO_API_LOG_TOKEN is not set");
+    let token_path =
+        env::var("TFO_API_LOG_TOKEN_PATH").unwrap_or(String::from("/jwt/TFO_API_LOG_TOKEN"));
+    let refresh_token_path =
+        env::var("REFRESH_TOKEN_PATH").unwrap_or(String::from("/jwt/REFRESH_TOKEN"));
+
     let generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
-    let api_client = APIClient::new(url, token, generation.as_str());
+    let api_client = APIClient::new(
+        url,
+        token,
+        generation.as_str(),
+        refresh_token_path,
+        token_path,
+    );
 
     let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
     let logpath = format!("{tfo_root_path}/generations/{}", generation);
