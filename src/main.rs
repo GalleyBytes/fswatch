@@ -528,17 +528,17 @@ fn run_notifier(
 fn main() {
     let group = String::from("v1");
     let kind = String::from("pods");
-    let namespace = env::var("TFO_NAMESPACE").unwrap_or(String::from("default"));
+    let namespace = env::var("I3_NAMESPACE").unwrap_or(String::from("default"));
     let resource = env::var("HOSTNAME").unwrap_or(String::from("-"));
 
-    let url = env::var("TFO_API_URL").expect("$TFO_API_URL is not set");
-    let token = env::var("TFO_API_LOG_TOKEN").expect("$TFO_API_LOG_TOKEN is not set");
+    let url = env::var("I3_API_URL").expect("$I3_API_URL is not set");
+    let token = env::var("I3_API_LOG_TOKEN").expect("$I3_API_LOG_TOKEN is not set");
     let token_path =
-        env::var("TFO_API_LOG_TOKEN_PATH").unwrap_or(String::from("/jwt/TFO_API_LOG_TOKEN"));
+        env::var("I3_API_LOG_TOKEN_PATH").unwrap_or(String::from("/jwt/I3_API_LOG_TOKEN"));
     let refresh_token_path =
         env::var("REFRESH_TOKEN_PATH").unwrap_or(String::from("/jwt/REFRESH_TOKEN"));
 
-    let generation = env::var("TFO_GENERATION").expect("$TFO_GENERATION is not set");
+    let generation = env::var("I3_GENERATION").expect("$I3_GENERATION is not set");
     let api_client = APIClient::new(
         url,
         token,
@@ -547,8 +547,8 @@ fn main() {
         token_path,
     );
 
-    let tfo_root_path = env::var("TFO_ROOT_PATH").expect("$TFO_ROOT_PATH is not set");
-    let logpath = format!("{tfo_root_path}/generations/{}", generation);
+    let infra3_root_path = env::var("I3_ROOT_PATH").expect("$I3_ROOT_PATH is not set");
+    let logpath = format!("{infra3_root_path}/generations/{}", generation);
 
     run_notifier(api_client, logpath, group, kind, namespace, resource)
         .expect("Failed to start notifier");
